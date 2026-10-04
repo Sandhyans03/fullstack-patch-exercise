@@ -39,19 +39,29 @@ CREATE OR REPLACE PACKAGE BODY task_search_pkg AS
         p_results     OUT task_cursor,
         p_total_count OUT NUMBER
     ) IS
-        v_term   VARCHAR2(257);
+        -- Escaping can double the input length, so the old VARCHAR2(257) was too small.
+        v_term   VARCHAR2(4000);
         v_offset NUMBER;
     BEGIN
-        v_term   := '%' || LOWER(NVL(p_search_term, '')) || '%';
+        IF p_page IS NULL OR p_page < 1 OR p_page_size IS NULL OR p_page_size < 1 THEN
+            RAISE_APPLICATION_ERROR(-20001, 'p_page and p_page_size must be >= 1');
+        END IF;
+
+        -- Escape LIKE wildcards (and the escape char itself) so user input matches
+        -- literally; the LIKE predicates below declare ESCAPE '\'.
+        v_term   := '%' || REPLACE(REPLACE(REPLACE(LOWER(NVL(p_search_term, '')),
+                        '\', '\\'), '%', '\%'), '_', '\_') || '%';
         v_offset := (p_page - 1) * p_page_size;
 
-        -- Total count for pagination metadata
+        -- Total count for pagination metadata.
+        -- The parentheses around the OR are essential: AND binds tighter than OR, so
+        -- without them archived and status only constrained the title match.
         SELECT COUNT(*)
           INTO p_total_count
           FROM tasks
          WHERE archived = 0
-           AND LOWER(title) LIKE v_term
-            OR LOWER(description) LIKE v_term
+           AND (LOWER(title) LIKE v_term ESCAPE '\'
+                OR LOWER(description) LIKE v_term ESCAPE '\')
            AND (p_status IS NULL OR status = p_status);
 
         -- Paginated results using ROWNUM (pre-12c pattern)
@@ -64,10 +74,10 @@ CREATE OR REPLACE PACKAGE BODY task_search_pkg AS
                                assignee, created_at
                           FROM tasks
                          WHERE archived = 0
-                           AND LOWER(title) LIKE v_term
-                            OR LOWER(description) LIKE v_term
+                           AND (LOWER(title) LIKE v_term ESCAPE '\'
+                                OR LOWER(description) LIKE v_term ESCAPE '\')
                            AND (p_status IS NULL OR status = p_status)
-                         ORDER BY created_at DESC
+                         ORDER BY created_at DESC, id DESC
                     ) t
                    WHERE ROWNUM <= v_offset + p_page_size
               )
